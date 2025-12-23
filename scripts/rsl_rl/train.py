@@ -15,6 +15,13 @@ from isaaclab.app import AppLauncher
 # local imports
 import cli_args  # isort: skip
 
+from isaaclab.envs import (
+    DirectMARLEnv,
+    DirectMARLEnvCfg,
+    DirectRLEnvCfg,
+    ManagerBasedRLEnvCfg,
+    multi_agent_to_single_agent,
+)
 # add argparse arguments
 parser = argparse.ArgumentParser(description="Train an RL agent with RSL-RL.")
 parser.add_argument("--video", action="store_true", default=False, help="Record videos during training.")
@@ -83,13 +90,6 @@ from datetime import datetime
 
 from rsl_rl.runners import DistillationRunner, OnPolicyRunner
 
-from isaaclab.envs import (
-    DirectMARLEnv,
-    DirectMARLEnvCfg,
-    DirectRLEnvCfg,
-    ManagerBasedRLEnvCfg,
-    multi_agent_to_single_agent,
-)
 from isaaclab.utils.dict import print_dict
 from isaaclab.utils.io import dump_yaml
 
