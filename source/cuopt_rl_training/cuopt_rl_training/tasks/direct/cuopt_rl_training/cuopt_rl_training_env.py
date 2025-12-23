@@ -9,9 +9,8 @@ from isaaclab.envs import DirectRLEnv
 import isaaclab.sim.utils.prims as prim_utils
 import isaaclab.sim.simulation_context
 from isaaclab.sim.spawners.from_files import GroundPlaneCfg, spawn_ground_plane, spawn_from_usd
-from .cuopt_planner import CuOptPlanner
+from cuopt_rl_training.cuopt_helper.cuopt_planner import CuOptPlanner
 from .cuopt_rl_training_env_cfg import CuoptRlTrainingEnvCfg
-
 class CuoptRlTrainingEnv(DirectRLEnv):
     """Server-training env (centralized agent) + cuOpt routing solve.
 
