@@ -1,13 +1,16 @@
 from typing import List, Dict, Any, Optional
-from cuopt.routing import DataModel, Solve, SolverSettings, SolutionStatus
+from cuopt import routing
 import cudf
 
 
 class CuOptPlanner:
     def __init__(self, time_limits: float = 5.0, seed: int = 0):
-        self.settings = SolverSettings()
-        self.settings.time_limit = time_limits
-        self.settings.random_seed = seed
+        self.settings = routing.SolverSettings()
+        # notebook dùng set_time_limit()
+        self.settings.set_time_limit(time_limits)
+        # nếu có seed thì set, tùy version
+        if hasattr(self.settings, "random_seed"):
+            self.settings.random_seed = seed
 
     def plan(
         self,
@@ -17,9 +20,9 @@ class CuOptPlanner:
         vehicle_returns: Optional[List[int]] = None,
     ) -> List[Dict[str, Any]]:
         """
-        cost_matrix: NxN (float)
+        cost_matrix: NxN
         orders: [{id, location, pickup_idx(optional), delivery_idx(optional)}]
-        vehicle_starts/returns: indices into locations (length = num_vehicles)
+        vehicle_starts/returns: indices into locations
         """
         if vehicle_returns is None:
             vehicle_returns = list(vehicle_starts)
@@ -28,18 +31,21 @@ class CuOptPlanner:
         n_orders = len(orders)
         n_vehicles = len(vehicle_starts)
 
-        dm = DataModel(n_locations=n_locations, n_fleet=n_vehicles, n_orders=n_orders)
+        # NOTE: notebook dùng (n_locations, n_vehicles, n_orders)
+        dm = routing.DataModel(n_locations, n_vehicles, n_orders)
         dm.add_cost_matrix(cudf.DataFrame(cost_matrix))
 
-        order_locations = [int(order["location"]) for order in orders]
-        dm.set_order_locations(cudf.Series(order_locations, dtype="int32"))
+        # order locations
+        order_locations = cudf.Series([int(o["location"]) for o in orders], dtype="int32")
+        dm.set_order_locations(order_locations)
 
+        # vehicle locations
         dm.set_vehicle_locations(
             cudf.Series(vehicle_starts, dtype="int32"),
             cudf.Series(vehicle_returns, dtype="int32"),
         )
 
-        # Optional pickup-delivery pairs (only if you actually provide pickup_idx & delivery_idx)
+        # pickup/delivery pairs nếu có
         pickup_idx = [o.get("pickup_idx") for o in orders if "pickup_idx" in o]
         drop_idx = [o.get("delivery_idx") for o in orders if "delivery_idx" in o]
         if pickup_idx and drop_idx and len(pickup_idx) == len(drop_idx):
@@ -48,21 +54,30 @@ class CuOptPlanner:
                 cudf.Series(drop_idx, dtype="int32"),
             )
 
-        solver = Solve(dm, self.settings)
-        if solver.get_status() != SolutionStatus.SUCCESS:
-            raise RuntimeError(f"cuOpt solve failed: {solver.get_status()} - {solver.get_message()}")
+        routing_solution = routing.Solve(dm, self.settings)
 
-        route_df = solver.get_routes().to_pandas()
+        status = routing_solution.get_status()
+        if int(status) != 0:
+            raise RuntimeError(f"cuOpt solve failed: {status} - {routing_solution.get_message()}")
 
-        # NOTE: iterrows() yields (index, row)
+        # notebook dùng routing_solution.route (cudf DataFrame)
+        if hasattr(routing_solution, "route"):
+            route_df = routing_solution.route
+        elif hasattr(routing_solution, "get_route"):
+            route_df = routing_solution.get_route()
+        else:
+            raise RuntimeError("cuOpt solution has no route attribute/method")
+
+        route_pd = route_df.to_pandas()
+
         rows: List[Dict[str, Any]] = []
-        for _, row in route_df.iterrows():
+        for _, row in route_pd.iterrows():
             rows.append(
                 {
-                    "seq": int(row.route),
-                    "vehicle": int(row.truck_id),
-                    "location": int(row.location),
-                    "eta": float(row.arrival_stamp),
+                    "seq": int(row["route"]) if "route" in row else int(row["seq"]),
+                    "vehicle": int(row["truck_id"]),
+                    "location": int(row["location"]),
+                    "eta": float(row.get("arrival_stamp", 0.0)),
                 }
             )
         return rows

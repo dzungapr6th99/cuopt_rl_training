@@ -493,7 +493,7 @@ class CuoptRlTrainingEnv(DirectRLEnv):
                     self._robot_xy[env_id, i, 0] = nx
                     self._robot_xy[env_id, i, 1] = ny
 
-                    prim_path = f"/World/envs/env_{env_id}/Robots/Robot{i+1}"
+                    prim_path = f"/World/envs/env_{env_id}/Robot{i+1}"
                     self._set_robot_pose_xy(prim_path, nx, ny, z=0.0, yaw_rad=0.0)
                     print("robot", i, "from", cx, cy, "to", tx, ty)
 
