@@ -28,7 +28,7 @@ class CuOptPlanner:
         n_orders = len(orders)
         n_vehicles = len(vehicle_starts)
 
-        dm = DataModel(n_locations=n_locations, n_vehicles=n_vehicles, n_orders=n_orders)
+        dm = DataModel(n_locations=n_locations, n_fleet=n_vehicles, n_orders=n_orders)
         dm.add_cost_matrix(cudf.DataFrame(cost_matrix))
 
         order_locations = [int(order["location"]) for order in orders]

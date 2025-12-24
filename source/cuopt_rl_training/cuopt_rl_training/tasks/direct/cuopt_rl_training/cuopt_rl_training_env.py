@@ -17,6 +17,7 @@ from cuopt_rl_training.cuopt_helper.cuopt_extract_from_scene import (
     extract_nodes_from_stage,
     extract_edges_from_stage,
 )
+import traceback
 from cuopt_rl_training.order.order_generator import OrderGenerator
 from cuopt_rl_training.order.order_queue import OrderQueue
 from cuopt_rl_training.order.order_types import OrderType, OrderPriority, OrderState
@@ -370,7 +371,6 @@ class CuoptRlTrainingEnv(DirectRLEnv):
         """
         # Lazy-import to avoid breaking non-standalone runs
         from pxr import UsdGeom, Gf, Usd
-
         # Cache stage once (recommended). If you already store self._stage, use it.
         
 
@@ -438,6 +438,7 @@ class CuoptRlTrainingEnv(DirectRLEnv):
         )
         speed = float(getattr(self.cfg, "marker_speed", 1.0))
         step_dist = speed * dt
+        print("step_dist:", step_dist)
 
         for eid in env_ids:
             env_id = int(eid)
@@ -457,7 +458,7 @@ class CuoptRlTrainingEnv(DirectRLEnv):
                     vehicle_starts=starts,
                     vehicle_returns=rets,
                 )
-
+                print("plan_rows:", len(plan_rows))
                 # TODO: extract proposals -> resolve_conflicts -> apply block
                 # proposals = {rid: (u, v)}
                 # allowed, blocked = self.resolve_conflicts(proposals)
@@ -494,10 +495,13 @@ class CuoptRlTrainingEnv(DirectRLEnv):
 
                     prim_path = f"/World/envs/env_{env_id}/Robots/Robot{i+1}"
                     self._set_robot_pose_xy(prim_path, nx, ny, z=0.0, yaw_rad=0.0)
+                    print("robot", i, "from", cx, cy, "to", tx, ty)
 
-            except Exception:
+            except Exception as e:
                 self.last_cost[env_id] = float(getattr(self.cfg, "solve_fail_cost", 1e6))
                 self.last_status_ok[env_id] = False
+                print("[cuopt] solve fail and got exception: ", e)
+                traceback.print_exc()
     def robot_active_priority(self, robot_id: int) -> int:
         cargo = self._robot_cargo[robot_id]  # list of Order
         if not cargo:
