@@ -41,7 +41,7 @@ class TaskManager:
         self.vehicle_returns = vehicle_returns if vehicle_returns is not None else vehicle_starts
 
     #Planning and waypoint access
-    def plan_if_need(self, force:bool = Fasle)-> None:
+    def plan_if_need(self, force: bool = False)-> None:
         """Call CuOpt planner when no activate route of force = True"""
         if not force and self.current_route:
             return
