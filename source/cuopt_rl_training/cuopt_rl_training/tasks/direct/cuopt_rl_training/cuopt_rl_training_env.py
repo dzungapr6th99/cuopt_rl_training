@@ -1,38 +1,31 @@
 from __future__ import annotations
 
 import math
-
-from sympy import root
-from cuopt_rl_training.order.order_generator import OrderGenerator
-import torch
+import random
 from collections.abc import Sequence
 from typing import Any, Dict, List, Tuple
+
+import omni.usd
+import torch
 import isaaclab.sim as sim_utils
+from isaaclab.assets import Articulation
 from isaaclab.envs import DirectRLEnv
 import isaaclab.sim.utils.prims as prim_utils
-from isaaclab.assets import Articulation, ArticulationData
+from isaaclab.sim.spawners.from_files import GroundPlaneCfg, spawn_ground_plane, spawn_from_usd
 from isaaclab.utils.math import quat_from_euler_xyz
-from isaaclab.sim.spawners.from_files import (
-    GroundPlaneCfg,
-    spawn_ground_plane,
-    spawn_from_usd,
+
+from cuopt_rl_training.cuopt_helper.cuopt_extract_from_scene import (
+    extract_edges_from_stage,
+    extract_nodes_from_stage,
 )
 from cuopt_rl_training.cuopt_helper.cuopt_planner import CuOptPlanner
-from .cuopt_rl_training_env_cfg import CuoptRlTrainingEnvCfg
-import omni.usd
-from cuopt_rl_training.cuopt_helper.cuopt_extract_from_scene import (
-    extract_nodes_from_stage,
-    extract_edges_from_stage,
-)
-import traceback
+from cuopt_rl_training.order.order import Order
 from cuopt_rl_training.order.order_generator import OrderGenerator
 from cuopt_rl_training.order.order_queue import OrderQueue
-from cuopt_rl_training.order.order_types import OrderType, OrderPriority, OrderState
-from cuopt_rl_training.robots.robot_specs import spawn_all_robots_base, ROBOT_SPECS
-from typing import Sequence
-import random
+from cuopt_rl_training.order.order_types import OrderState, OrderType
+from .cuopt_rl_training_env_cfg import CuoptRlTrainingEnvCfg
 
-from pxr import UsdGeom, Gf
+import traceback
 
 
 class CuoptRlTrainingEnv(DirectRLEnv):
@@ -40,8 +33,8 @@ class CuoptRlTrainingEnv(DirectRLEnv):
 
     - Action is NOT robot control.
     - Action modifies scenario costs (e.g., congestion penalties).
-    - cuOpt is called each step (or on reset), producing last_cost -> reward/obs.
-    - Robots are VISUAL ONLY (USD references). No articulation, no wheel joints.
+    - cuOpt is called once per episode. Robots then follow the route.
+    - Robots are moved via articulation root pose (no wheel control).
     """
 
     cfg: CuoptRlTrainingEnvCfg
@@ -50,19 +43,22 @@ class CuoptRlTrainingEnv(DirectRLEnv):
         self, cfg: CuoptRlTrainingEnvCfg, render_mode: str | None = None, **kwargs
     ):
         super().__init__(cfg, render_mode, **kwargs)
-        self.viewport_camera_controller.update_view_location(
-            eye=(20.0, 20.0, 35.0),
-            lookat=(20.0, 20.0, 0.0),
-        )
+        # self.viewport_camera_controller.update_view_location(
+        #     eye=(20.0, 20.0, 35.0),
+        #     lookat=(20.0, 20.0, 0.0),
+        # )
 
         # cuOpt solver
         self.planner = CuOptPlanner(
             time_limits=float(getattr(self.cfg, "cuopt_time_limit", 5.0)),
             seed=int(getattr(self.cfg, "cuopt_seed", 0)),
         )
-        # 3 visual robots
+
+        # 3 robots
         self.K = 3
+        self._robot_speeds = [1.0, 1.0, 1.0]
         self._rng = random.Random(int(getattr(self.cfg, "order_seed", 0)))
+
         # Buffers
         self.actions: torch.Tensor = torch.zeros(
             (self.num_envs, int(self.cfg.action_space)), device=self.device
@@ -73,7 +69,7 @@ class CuoptRlTrainingEnv(DirectRLEnv):
         self.last_status_ok: torch.Tensor = torch.ones(
             (self.num_envs,), device=self.device, dtype=torch.bool
         )
-        self._xform_ops_cache: dict[str, tuple] = {}
+
         # Visual robot state per env
         self._robot_xy = torch.zeros(
             (self.num_envs, self.K, 2), device=self.device, dtype=torch.float32
@@ -81,22 +77,37 @@ class CuoptRlTrainingEnv(DirectRLEnv):
         self._robot_yaw = torch.zeros(
             (self.num_envs, self.K), device=self.device, dtype=torch.float32
         )
-        self._route_locs: List[List[List[int]]] = [[[] for _ in range(self.K)] for _ in range(self.num_envs)]
-        self._route_idx: List[List[int]] = [[0 for _ in range(self.K)] for _ in range(self.num_envs)]
+
+        # Route + cargo state
+        self._route_locs: List[List[List[int]]] = [
+            [[] for _ in range(self.K)] for _ in range(self.num_envs)
+        ]
+        self._route_orders: List[List[List[Order | None]]] = [
+            [[] for _ in range(self.K)] for _ in range(self.num_envs)
+        ]
+        self._robot_cargo: List[List[List[Order]]] = [
+            [[] for _ in range(self.K)] for _ in range(self.num_envs)
+        ]
+        self._last_node: List[List[int | None]] = [
+            [None for _ in range(self.K)] for _ in range(self.num_envs)
+        ]
+        self._planned: torch.Tensor = torch.zeros(
+            (self.num_envs,), device=self.device, dtype=torch.bool
+        )
+
         # Scenario state per env (python lists ok for now)
         self._cost_matrices: List[List[List[float]]] = [None] * self.num_envs  # type: ignore
-        self._orders: List[List[Dict[str, Any]]] = [None] * self.num_envs  # type: ignore
+        self._orders: List[List[Order]] = [None] * self.num_envs  # type: ignore
         self._vehicle_starts: List[List[int]] = [None] * self.num_envs  # type: ignore
         self._vehicle_returns: List[List[int]] = [None] * self.num_envs  # type: ignore
         self._blocked_edges: List[List[Tuple[int, int]]] = [
             [] for _ in range(self.num_envs)
         ]
-        self._rl_step_counter = 0
-        self._cuopt_interval_rl = max(
-            1, int(round((1 / float(self.cfg.sim.dt)) / int(self.cfg.decimation) / 2))
-        )
+
         # Location -> (x,y) lookup per env
         self._loc_xy: List[List[Tuple[float, float]]] = [None] * self.num_envs  # type: ignore
+
+        # Orders
         self._order_gen = OrderGenerator(seed=int(getattr(self.cfg, "order_seed", 0)))
         self._order_queue_type1 = OrderQueue()
         self._order_queue_type2 = OrderQueue()
@@ -105,17 +116,17 @@ class CuoptRlTrainingEnv(DirectRLEnv):
     # ----------------------- Scene -----------------------
 
     def _setup_scene(self):
-        # Load warehouse USD in source env_0 so clone works
-
         spawn_ground_plane(prim_path="/World/ground", cfg=GroundPlaneCfg())
 
         spawn_from_usd(
             prim_path="/World/envs/env_0/Warehouse",
             cfg=self.cfg.warehouse_cfg,
         )
-        # Create parent prim for robot visuals (must exist before spawn)
+
+        # Parent prim for robot assets (required by regex prim paths).
         prim_utils.create_prim("/World/envs/env_0/Robots", prim_type="Xform")
 
+        # Articulations for 3 robots
         self.robot1 = Articulation(self.cfg.robot1_cfg)
         self.robot2 = Articulation(self.cfg.robot2_cfg)
         self.robot3 = Articulation(self.cfg.robot3_cfg)
@@ -127,38 +138,11 @@ class CuoptRlTrainingEnv(DirectRLEnv):
         self.scene.articulations["robot1"] = self.robot1
         self.scene.articulations["robot2"] = self.robot2
         self.scene.articulations["robot3"] = self.robot3
-
-        self.robots = {
-            "robot1": self.robot1,
-            "robot2": self.robot2,
-            "robot3": self.robot3,
-        }
-        for i in range(len(ROBOT_SPECS)):
-            prim_path = f"/World/envs/env_0/Robots/Robot{i+1}"
-            self._init_robot_xform_ops(prim_path)
-        # Clone/replicate envs
-        self.scene.clone_environments(copy_from_source=False)
-        if self.device == "cpu":
-            self.scene.filter_collisions(global_prim_paths=[])
+        self.robots = [self.robot1, self.robot2, self.robot3]
 
         # Light (optional)
         light_cfg = sim_utils.DomeLightCfg(intensity=2000.0, color=(0.75, 0.75, 0.75))
         light_cfg.func("/World/Light", light_cfg)
-
-    def _init_robot_xform_ops(self, prim_path: str) -> None:
-        if not hasattr(self, "_xform_ops_cache"):
-            self._xform_ops_cache = {}
-        prim = prim_utils.get_prim_at_path(prim_path)
-        if not prim or not prim.IsValid():
-            return
-
-        xform = UsdGeom.Xformable(prim)
-        # Clear once to make ops compatible.
-        xform.ClearXformOpOrder()
-        t_op = xform.AddTranslateOp(UsdGeom.XformOp.PrecisionDouble)
-        r_op = xform.AddRotateXYZOp(UsdGeom.XformOp.PrecisionDouble)
-        s_op = xform.AddScaleOp(UsdGeom.XformOp.PrecisionDouble)
-        self._xform_ops_cache[prim_path] = (t_op, r_op, s_op)
 
     def _spawn_fixed_orders_for_episode(self, n_locations: int, step: int):
         q1 = self._order_queue_type1
@@ -176,7 +160,7 @@ class CuoptRlTrainingEnv(DirectRLEnv):
 
         orders2 = self._order_gen.spawn_fixed_type(
             start_id=q2.next_id(),
-            n_orders=10,
+            n_orders=20,
             n_locations=n_locations,
             step=step,
             order_type=OrderType.TYPE2,
@@ -214,12 +198,16 @@ class CuoptRlTrainingEnv(DirectRLEnv):
         self.actions = act
 
     def _apply_action(self) -> None:
-        # No robot control here. Solve cuOpt so rewards/obs use updated last_cost.
-        self._rl_step_counter += 1
-        if self._rl_step_counter % self._cuopt_interval_rl != 0:
-            return
         env_ids = torch.arange(self.num_envs, device=self.device, dtype=torch.long)
-        self._solve_for_env_ids(env_ids)
+
+        # plan only once per episode
+        to_plan = (~self._planned).nonzero(as_tuple=False).squeeze(-1)
+        if to_plan.numel() > 0:
+            self._plan_routes_for_env_ids(to_plan)
+            self._planned[to_plan] = True
+
+        # move every step
+        self._advance_robots(env_ids)
 
     def _get_observations(self) -> dict:
         n_vehicles = torch.tensor(
@@ -273,36 +261,36 @@ class CuoptRlTrainingEnv(DirectRLEnv):
             self._build_scenario(e)
             self._reset_visual_robots(e)
 
+            self._route_locs[e] = [[] for _ in range(self.K)]
+            self._route_orders[e] = [[] for _ in range(self.K)]
+            self._robot_cargo[e] = [[] for _ in range(self.K)]
+            self._last_node[e] = [None for _ in range(self.K)]
+            self._planned[e] = False
+
         # Reset per-env solve buffers
         self.last_cost[env_ids] = 0.0
         self.last_status_ok[env_ids] = True
 
         # Optional initial solve
         if bool(getattr(self.cfg, "solve_on_reset", True)):
-            self._solve_for_env_ids(env_ids)
+            self._plan_routes_for_env_ids(env_ids)
+            self._planned[env_ids] = True
 
     def _sample_orders_for_cuopt(self):
-        pools = [
-            (self._order_queue_type1, 1),
-            (self._order_queue_type2, 2),
-            (self._order_queue_type3, 3),
-        ]
-        picked = []
-        for q, cap in pools:
-            cand = q.list_active()
-            self._rng.shuffle(cand)
-            picked.extend(cand[:cap])
-        return self._orders_to_cuopt(picked)
+        orders = []
+        orders.extend(self._order_queue_type1.list_active())
+        orders.extend(self._order_queue_type2.list_active())
+        orders.extend(self._order_queue_type3.list_active())
+        return self._orders_to_cuopt(orders)
 
     def _extract_graph_from_scene(self, env_id: int):
         stage = omni.usd.get_context().get_stage()
-        root_path = f"/World/envs/env_{env_id}/Warehouse/Warehouse/Transportation/WaypointGraph"  # đổi nếu node/edge nằm nơi khác
+        root_path = f"/World/envs/env_{env_id}/Warehouse/Warehouse/Transportation/WaypointGraph"
         nodes_xyz = extract_nodes_from_stage(
             stage=stage,
             root_prim_path=f"{root_path}/Nodes",
             node_prefix="Node_",
         )
-        print(nodes_xyz[:5])        
         edges = extract_edges_from_stage(
             stage=stage,
             n_nodes=len(nodes_xyz),
@@ -335,23 +323,14 @@ class CuoptRlTrainingEnv(DirectRLEnv):
         nodes_xyz, edges = self._extract_graph_from_scene(env_id)
         cm = self._build_cost_matrix_from_edges(nodes_xyz, edges)
         n_locations = len(nodes_xyz)
-        step = (
-            int(self.common_step_counter) if hasattr(self, "common_step_counter") else 0
-        )
+        step = int(self.common_step_counter) if hasattr(self, "common_step_counter") else 0
 
-        orders1, orders2, orders3 = self._spawn_fixed_orders_for_episode(
-            n_locations, step
-        )
-        self._orders_type1, self._orders_type2, self._orders_type3 = (
-            orders1,
-            orders2,
-            orders3,
-        )
+        orders1, orders2, orders3 = self._spawn_fixed_orders_for_episode(n_locations, step)
 
         # dùng XY từ scene
         self._loc_xy[env_id] = [(x, y) for (x, y, _z) in nodes_xyz]
 
-        starts = [self._rng.randrange(0, n_locations) for _ in range(3)]
+        starts = [self._rng.randrange(0, n_locations) for _ in range(self.K)]
         self._blocked_edges[env_id] = []
         self._cost_matrices[env_id] = cm
         self._orders[env_id] = orders1 + orders2 + orders3
@@ -361,7 +340,6 @@ class CuoptRlTrainingEnv(DirectRLEnv):
     # ----------------------- Visual robots -----------------------
 
     def _reset_visual_robots(self, env_id: int) -> None:
-        """Place 3 visual robots at start locations (0,5,10)."""
         nloc = len(self._loc_xy[env_id])
         starts = [self._rng.randrange(0, nloc) for _ in range(self.K)]
 
@@ -371,13 +349,11 @@ class CuoptRlTrainingEnv(DirectRLEnv):
             self._robot_xy[env_id, i, 0] = x
             self._robot_xy[env_id, i, 1] = y
             self._robot_yaw[env_id, i] = 0.0
-
-            prim_path = f"/World/envs/env_{env_id}/Robots/Robot{i+1}"
-            self._set_robot_pose_xy(f"robot{i+1}", x, y, z=0.01, yaw_rad=0.0)
+            self._set_robot_pose_xy(i, x, y, z=0.01, yaw_rad=0.0)
 
     def _set_robot_pose_xy(
         self,
-        robot_id: str,
+        robot_id: int,
         x: float,
         y: float,
         z: float = 0.0,
@@ -412,25 +388,6 @@ class CuoptRlTrainingEnv(DirectRLEnv):
                 cm[u][v] = min(blocked_value, cm[u][v] + penalty_scale * blocked_value)
         return cm
 
-    def _extract_next_targets(
-        self, plan_rows: List[Dict[str, Any]], n_vehicles: int
-    ) -> List[int]:
-        targets = [0] * n_vehicles
-        by_v = [[] for _ in range(n_vehicles)]
-        for r in plan_rows:
-            v = int(r["vehicle"])
-            if 0 <= v < n_vehicles:
-                by_v[v].append(r)
-
-        for v in range(n_vehicles):
-            rows = sorted(by_v[v], key=lambda x: x["seq"])
-            if len(rows) >= 2:
-                targets[v] = int(rows[1]["location"])
-            elif len(rows) == 1:
-                targets[v] = int(rows[0]["location"])
-            else:
-                targets[v] = 0
-        return targets
     def _build_routes_from_plan(self, plan_rows: List[Dict[str, Any]], n_vehicles: int) -> List[List[int]]:
         routes = [[] for _ in range(n_vehicles)]
         by_v = [[] for _ in range(n_vehicles)]
@@ -441,13 +398,56 @@ class CuoptRlTrainingEnv(DirectRLEnv):
 
         for v in range(n_vehicles):
             rows = sorted(by_v[v], key=lambda x: x["seq"])
-            routes[v] = [int(r["location"]) for r in rows]
+            locs = [int(r["location"]) for r in rows]
+            # Remove consecutive duplicates to avoid stuck steps.
+            compacted: List[int] = []
+            for loc in locs:
+                if not compacted or loc != compacted[-1]:
+                    compacted.append(loc)
+            routes[v] = compacted
         return routes
-    def _solve_for_env_ids(self, env_ids: Sequence[int]) -> None:
-        dt = float(getattr(self.cfg.sim, "dt", 1 / 24)) * int(
-            getattr(self.cfg, "decimation", 1)
-        )
 
+    def _assign_orders_to_routes(self, env_id: int, routes: List[List[int]]) -> None:
+        loc_map: Dict[int, List[Order]] = {}
+        for o in self._orders[env_id]:
+            loc_map.setdefault(int(o.location), []).append(o)
+
+        for rid in range(self.K):
+            self._robot_cargo[env_id][rid] = []
+            self._route_orders[env_id][rid] = []
+            for loc in routes[rid]:
+                assigned = None
+                if loc in loc_map and loc_map[loc]:
+                    assigned = loc_map[loc].pop(0)
+                    assigned.assigned_robot = rid
+                    assigned.state = OrderState.ASSIGNED
+                    self._robot_cargo[env_id][rid].append(assigned)
+                self._route_orders[env_id][rid].append(assigned)
+
+    def _robot_priority(self, env_id: int, robot_id: int) -> int:
+        cargo = self._robot_cargo[env_id][robot_id]
+        if not cargo:
+            return 0
+        return max(int(o.priority) for o in cargo)
+
+    def _resolve_next_node_conflicts(self, env_id: int, next_nodes: Dict[int, int]) -> set[int]:
+        claims: Dict[int, List[int]] = {}
+        for rid, loc in next_nodes.items():
+            claims.setdefault(loc, []).append(rid)
+
+        allowed = set(next_nodes.keys())
+        for loc, rids in claims.items():
+            if len(rids) > 1:
+                winner = max(rids, key=lambda r: self._robot_priority(env_id, r))
+                for r in rids:
+                    if r != winner:
+                        allowed.discard(r)
+                        print(
+                            f"[yield] env {env_id} robot {r} waits for robot {winner} at node {loc}"
+                        )
+        return allowed
+
+    def _plan_routes_for_env_ids(self, env_ids: Sequence[int]) -> None:
         for eid in env_ids:
             env_id = int(eid)
             cm0 = self._cost_matrices[env_id]
@@ -464,7 +464,6 @@ class CuoptRlTrainingEnv(DirectRLEnv):
                     vehicle_starts=starts,
                     vehicle_returns=rets,
                 )
-                print("[solve] plan_rows:", len(plan_rows), plan_rows[:3])
 
                 cost = (
                     0.0
@@ -476,106 +475,96 @@ class CuoptRlTrainingEnv(DirectRLEnv):
 
                 n_veh = len(starts) if starts is not None else self.K
                 routes = self._build_routes_from_plan(plan_rows, n_vehicles=n_veh)
-                for v, locs in enumerate(routes):
-                    print(f"[route] v{v}:", locs)
                 self._route_locs[env_id] = routes
-                self._route_idx[env_id] = [0 for _ in range(self.K)]
-                loc_xy = self._loc_xy[env_id]
-
-                for i in range(self.K):
-                    route = self._route_locs[env_id][i]
-                    if not route:
-                        continue
-
-                    idx = self._route_idx[env_id][i]
-                    if idx >= len(route):
-                        idx = len(route) - 1
-
-                    tgt_loc = route[idx]
-                    tx, ty = loc_xy[tgt_loc]
-
-                    cx = float(self._robot_xy[env_id, i, 0].item())
-                    cy = float(self._robot_xy[env_id, i, 1].item())
-
-                    dx, dy = tx - cx, ty - cy
-                    dist = math.sqrt(dx * dx + dy * dy)
-
-                    # if reached current node, advance to next
-                    reach_eps = 0.2
-                    if dist < reach_eps and idx + 1 < len(route):
-                        self._route_idx[env_id][i] = idx + 1
-                        tgt_loc = route[idx + 1]
-                        tx, ty = loc_xy[tgt_loc]
-                        dx, dy = tx - cx, ty - cy
-                        dist = math.sqrt(dx * dx + dy * dy)
-
-                    theta = math.atan2(dy, dx)
-
-                    step_dist = getattr(ROBOT_SPECS[i], "speed", 1.0) * 3.0
-                    if dist > 1e-6:
-                        s = min(1.0, step_dist / dist)
-                        nx = cx + dx * s
-                        ny = cy + dy * s
-                    else:
-                        nx, ny = cx, cy
-
-                    print(
-                        f"[move] robot {i + 1}: from node {route[idx]} ({cx:.2f},{cy:.2f}) to node {tgt_loc} ({tx:.2f},{ty:.2f}) -> new ({nx:.2f},{ny:.2f}) step_dist {step_dist:.3f}"
-                    )
-
-                    self._robot_xy[env_id, i, 0] = nx
-                    self._robot_xy[env_id, i, 1] = ny
-                    self._set_robot_pose_xy(f"robot{i+1}", nx, ny, z=0.0, yaw_rad=theta)
+                self._assign_orders_to_routes(env_id, routes)
+                self._last_node[env_id] = [
+                    r[0] if r else None for r in self._route_locs[env_id]
+                ]
+                veh_ids = sorted({int(r["vehicle"]) for r in plan_rows}) if plan_rows else []
+                print(f"[plan] env {env_id} vehicles: {veh_ids} route_lens: {[len(r) for r in routes]}")
 
             except Exception:
-                self.last_cost[env_id] = float(
-                    getattr(self.cfg, "solve_fail_cost", 1e6)
-                )
+                self.last_cost[env_id] = float(getattr(self.cfg, "solve_fail_cost", 1e6))
                 self.last_status_ok[env_id] = False
                 traceback.print_exc()
 
-    def robot_active_priority(self, robot_id: int) -> int:
-        cargo = self._robot_cargo[robot_id]  # list of Order
-        if not cargo:
-            return 0
-        return max(int(o.priority) for o in cargo)
+    def _advance_robots(self, env_ids: Sequence[int]) -> None:
+        dt = float(getattr(self.cfg.sim, "dt", 1 / 24)) * int(
+            getattr(self.cfg, "decimation", 1)
+        )
+
+        for eid in env_ids:
+            env_id = int(eid)
+            loc_xy = self._loc_xy[env_id]
+
+            next_nodes: Dict[int, int] = {}
+            for i in range(self.K):
+                route = self._route_locs[env_id][i]
+                if not route:
+                    continue
+                next_nodes[i] = route[0]
+
+            allowed = self._resolve_next_node_conflicts(env_id, next_nodes)
+
+            for i in range(self.K):
+                route = self._route_locs[env_id][i]
+                nxt = route[0] if route else None
+                state = "allow" if i in allowed else "wait"
+                print(f"[next] env {env_id} robot {i}: next {nxt} ({state})")
+
+            for i in range(self.K):
+                if i not in next_nodes:
+                    continue
+                if i not in allowed:
+                    continue
+
+                route = self._route_locs[env_id][i]
+
+                tgt_loc = route[0]
+                tx, ty = loc_xy[tgt_loc]
+
+                cx = float(self._robot_xy[env_id, i, 0].item())
+                cy = float(self._robot_xy[env_id, i, 1].item())
+
+                dx, dy = tx - cx, ty - cy
+                dist = math.sqrt(dx * dx + dy * dy)
+
+                reach_eps = 0.2
+                if dist < reach_eps:
+                    prev_loc = self._route_locs[env_id][i][0]
+                    order = self._route_orders[env_id][i][0] if self._route_orders[env_id][i] else None
+                    if order is not None:
+                        order.state = OrderState.DELIVERED
+                        if order in self._robot_cargo[env_id][i]:
+                            self._robot_cargo[env_id][i].remove(order)
+
+                    # pop current node from route queue
+                    self._route_locs[env_id][i].pop(0)
+                    if self._route_orders[env_id][i]:
+                        self._route_orders[env_id][i].pop(0)
+
+                    if not self._route_locs[env_id][i]:
+                        continue
+                    self._last_node[env_id][i] = prev_loc
+                    tgt_loc = self._route_locs[env_id][i][0]
+                    tx, ty = loc_xy[tgt_loc]
+                    dx, dy = tx - cx, ty - cy
+                    dist = math.sqrt(dx * dx + dy * dy)
+                    print(f"[step] env {env_id} robot {i}: node {prev_loc} -> {tgt_loc}")
+
+                theta = math.atan2(dy, dx)
+
+                step_dist = self._robot_speeds[i] * dt
+                if dist > 1e-6:
+                    s = min(1.0, step_dist / dist)
+                    nx = cx + dx * s
+                    ny = cy + dy * s
+                else:
+                    nx, ny = cx, cy
+
+                self._robot_xy[env_id, i, 0] = nx
+                self._robot_xy[env_id, i, 1] = ny
+                self._set_robot_pose_xy(i, nx, ny, z=0.0, yaw_rad=theta)
 
     def _orders_to_cuopt(self, orders):
         return [{"id": o.id, "location": o.location} for o in orders]
-
-    def resolve_conflicts(self, proposals):
-        # proposals: {rid: (u, v)}
-        edge_claims = {}
-        node_claims = {}
-
-        for rid, (u, v) in proposals.items():
-            edge_claims.setdefault((u, v), []).append(rid)
-            node_claims.setdefault(v, []).append(rid)
-
-        allowed = set(proposals.keys())
-        blocked = set()
-
-        # edge conflicts
-        for edge, rids in edge_claims.items():
-            if len(rids) > 1:
-                winner = max(rids, key=lambda r: self.robot_active_priority(r))
-                for r in rids:
-                    if r != winner:
-                        blocked.add(r)
-
-        # node conflicts (arrive same node)
-        for node, rids in node_claims.items():
-            if len(rids) > 1:
-                winner = max(rids, key=lambda r: self.robot_active_priority(r))
-                for r in rids:
-                    if r != winner:
-                        blocked.add(r)
-
-        allowed -= blocked
-        return allowed, blocked
-    def _routes_finished(self, env_id: int) -> bool:
-        for i in range(self.K):
-            route = self._route_locs[env_id][i]
-            if route and self._route_idx[env_id][i] < len(route) - 1:
-                return False
-        return True
