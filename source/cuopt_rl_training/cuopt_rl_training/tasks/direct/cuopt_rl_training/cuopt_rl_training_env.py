@@ -8,11 +8,9 @@ from typing import Any, Dict, List, Tuple
 import omni.usd
 import torch
 import isaaclab.sim as sim_utils
-from isaaclab.assets import Articulation
 from isaaclab.envs import DirectRLEnv
 import isaaclab.sim.utils.prims as prim_utils
 from isaaclab.sim.spawners.from_files import GroundPlaneCfg, spawn_ground_plane, spawn_from_usd
-from isaaclab.utils.math import quat_from_euler_xyz
 
 from cuopt_rl_training.cuopt_helper.cuopt_extract_from_scene import (
     extract_edges_from_stage,
@@ -126,19 +124,23 @@ class CuoptRlTrainingEnv(DirectRLEnv):
         # Parent prim for robot assets (required by regex prim paths).
         prim_utils.create_prim("/World/envs/env_0/Robots", prim_type="Xform")
 
-        # Articulations for 3 robots
-        self.robot1 = Articulation(self.cfg.robot1_cfg)
-        self.robot2 = Articulation(self.cfg.robot2_cfg)
-        self.robot3 = Articulation(self.cfg.robot3_cfg)
+        # Spawn visual robots (no articulation / physics).
+        spawn_from_usd(
+            prim_path="/World/envs/env_0/Robots/Robot1",
+            cfg=sim_utils.UsdFileCfg(usd_path=self.cfg.robot1_cfg.spawn.usd_path),
+        )
+        spawn_from_usd(
+            prim_path="/World/envs/env_0/Robots/Robot2",
+            cfg=sim_utils.UsdFileCfg(usd_path=self.cfg.robot2_cfg.spawn.usd_path),
+        )
+        spawn_from_usd(
+            prim_path="/World/envs/env_0/Robots/Robot3",
+            cfg=sim_utils.UsdFileCfg(usd_path=self.cfg.robot3_cfg.spawn.usd_path),
+        )
 
         self.scene.clone_environments(copy_from_source=False)
         if self.device == "cpu":
             self.scene.filter_collisions(global_prim_paths=[])
-
-        self.scene.articulations["robot1"] = self.robot1
-        self.scene.articulations["robot2"] = self.robot2
-        self.scene.articulations["robot3"] = self.robot3
-        self.robots = [self.robot1, self.robot2, self.robot3]
 
         # Light (optional)
         light_cfg = sim_utils.DomeLightCfg(intensity=2000.0, color=(0.75, 0.75, 0.75))
@@ -349,28 +351,55 @@ class CuoptRlTrainingEnv(DirectRLEnv):
             self._robot_xy[env_id, i, 0] = x
             self._robot_xy[env_id, i, 1] = y
             self._robot_yaw[env_id, i] = 0.0
-            self._set_robot_pose_xy(i, x, y, z=0.3, yaw_rad=0.0)
+            prim_path = f"/World/envs/env_{env_id}/Robots/Robot{i+1}"
+            self._set_robot_pose_xy(prim_path, x, y, z=0.3, yaw_rad=0.0)
 
     def _set_robot_pose_xy(
         self,
-        robot_id: int,
+        prim_path: str,
         x: float,
         y: float,
         z: float = 0.0,
         yaw_rad: float = 0.0,
     ) -> None:
-        robot = self.robots[robot_id]
-        root_state = robot.data.default_root_state.clone()
-        root_state[:, 0] = x
-        root_state[:, 1] = y
-        root_state[:, 2] = z
+        from pxr import Gf, UsdGeom
 
-        yaw = torch.tensor([yaw_rad], device=self.device)
-        zero = torch.tensor([0.0], device=self.device)
-        quat = quat_from_euler_xyz(zero, zero, yaw)
-        root_state[:, 3:7] = quat
+        prim = prim_utils.get_prim_at_path(prim_path)
+        if not prim.IsValid():
+            raise ValueError(f"Prim not found or invalid: {prim_path}")
 
-        robot.write_root_pose_to_sim(root_state[:, :7])
+        xformable = UsdGeom.Xformable(prim)
+        if not xformable:
+            raise ValueError(f"Prim is not Xformable: {prim_path}")
+
+        translate_op = None
+        rotate_op = None
+        orient_op = None
+        scale_op = None
+        for op in xformable.GetOrderedXformOps():
+            if op.GetOpType() == UsdGeom.XformOp.TypeTranslate:
+                translate_op = op
+            elif op.GetOpType() == UsdGeom.XformOp.TypeRotateZ:
+                rotate_op = op
+            elif op.GetOpType() == UsdGeom.XformOp.TypeOrient:
+                orient_op = op
+            elif op.GetOpType() == UsdGeom.XformOp.TypeScale:
+                scale_op = op
+
+        if translate_op is None:
+            translate_op = xformable.AddTranslateOp()
+        if rotate_op is None and orient_op is None:
+            rotate_op = xformable.AddRotateZOp()
+
+        translate_op.Set((float(x), float(y), float(z)))
+        yaw_deg = float(yaw_rad * 180.0 / math.pi)
+        if rotate_op is not None:
+            rotate_op.Set(yaw_deg)
+        elif orient_op is not None:
+            rot = Gf.Rotation(Gf.Vec3d(0.0, 0.0, 1.0), yaw_deg)
+            orient_op.Set(rot.GetQuat())
+        if scale_op is not None:
+            scale_op.Set((1.0, 1.0, 1.0))
 
     # ----------------------- Solve -----------------------
 
@@ -564,7 +593,8 @@ class CuoptRlTrainingEnv(DirectRLEnv):
 
                 self._robot_xy[env_id, i, 0] = nx
                 self._robot_xy[env_id, i, 1] = ny
-                self._set_robot_pose_xy(i, nx, ny, z=0.0, yaw_rad=theta)
+                prim_path = f"/World/envs/env_{env_id}/Robots/Robot{i+1}"
+                self._set_robot_pose_xy(prim_path, nx, ny, z=0.0, yaw_rad=theta)
 
     def _orders_to_cuopt(self, orders):
         return [{"id": o.id, "location": o.location} for o in orders]
