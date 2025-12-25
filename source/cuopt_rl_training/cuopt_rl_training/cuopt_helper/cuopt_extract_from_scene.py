@@ -53,7 +53,6 @@ def extract_nodes_from_stage(
     missing = [i for i in range(max_idx + 1) if i not in nodes]
     if missing:
         raise RuntimeError(f"Missing node indices: {missing[:20]}{'...' if len(missing)>20 else ''}")
-
     return [nodes[i] for i in range(max_idx + 1)]
 
 _EDGE_RE_CACHE: Dict[str, re.Pattern] = {}

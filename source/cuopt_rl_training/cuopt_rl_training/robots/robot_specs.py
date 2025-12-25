@@ -16,15 +16,15 @@ class RobotSpec:
 
 ROBOT_SPECS: Dict[int, RobotSpec] = {
     0: RobotSpec(
-        name="jetbot",
-        usd_path="/mnt/hdd/isaac/Isaac-Object/Robot/Collected_NVIDIA/jetbot.usd",  # TODO: chỉnh path đúng
+        name="carter_v1",
+        usd_path="/mnt/hdd/isaac/Isaac-Object/Robot/carter_v1_removecam.usd",  # TODO: chỉnh path đúng
         order_type=1,
         capacity=1,
         speed= 1.0
     ),
     1: RobotSpec(
         name="nova_carter",
-        usd_path="/mnt/hdd/isaac/Isaac-Object/Robot/Collected_NVIDIA/nova_carter.usd",
+        usd_path="/mnt/hdd/isaac/Isaac-Object/Robot/nova_carter_removecam.usd",
         order_type=2,
         capacity=2,
         speed= 1.0
