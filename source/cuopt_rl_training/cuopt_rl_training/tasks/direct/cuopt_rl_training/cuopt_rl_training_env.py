@@ -18,7 +18,7 @@ from cuopt_rl_training.cuopt_helper.cuopt_extract_from_scene import (
     extract_edges_from_stage,
     extract_nodes_from_stage,
 )
-from cuopt_rl_training.cuopt_helper.cuopt_planner import CuOptPlanner
+from cuopt_rl_training.cuopt_helper.cuopt_planner_windows import CuOptPlanner
 from cuopt_rl_training.order.order import Order
 from cuopt_rl_training.order.order_generator import OrderGenerator
 from cuopt_rl_training.order.order_queue import OrderQueue
@@ -43,10 +43,10 @@ class CuoptRlTrainingEnv(DirectRLEnv):
         self, cfg: CuoptRlTrainingEnvCfg, render_mode: str | None = None, **kwargs
     ):
         super().__init__(cfg, render_mode, **kwargs)
-        # self.viewport_camera_controller.update_view_location(
-        #     eye=(20.0, 20.0, 35.0),
-        #     lookat=(20.0, 20.0, 0.0),
-        # )
+        self.viewport_camera_controller.update_view_location(
+            eye=(20.0, 20.0, 25.0),
+            lookat=(20.0, 20.0, 0.0),
+        )
 
         # cuOpt solver
         self.planner = CuOptPlanner(
@@ -116,7 +116,7 @@ class CuoptRlTrainingEnv(DirectRLEnv):
     # ----------------------- Scene -----------------------
 
     def _setup_scene(self):
-        spawn_ground_plane(prim_path="/World/ground", cfg=GroundPlaneCfg())
+        #spawn_ground_plane(prim_path="/World/ground", cfg=GroundPlaneCfg())
 
         spawn_from_usd(
             prim_path="/World/envs/env_0/Warehouse",
@@ -349,7 +349,7 @@ class CuoptRlTrainingEnv(DirectRLEnv):
             self._robot_xy[env_id, i, 0] = x
             self._robot_xy[env_id, i, 1] = y
             self._robot_yaw[env_id, i] = 0.0
-            self._set_robot_pose_xy(i, x, y, z=0.01, yaw_rad=0.0)
+            self._set_robot_pose_xy(i, x, y, z=0.3, yaw_rad=0.0)
 
     def _set_robot_pose_xy(
         self,

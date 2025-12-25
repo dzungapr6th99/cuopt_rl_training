@@ -12,10 +12,10 @@ from isaaclab.utils import configclass
 @configclass
 class CuoptRlTrainingEnvCfg(DirectRLEnvCfg):
     # paths
-    scene_usd_path: str = "/mnt/hdd/isaac/Isaac-Object/Warehouse_cuopt_graph_only.usd"
-    nova_carter_usd_path: str = "/mnt/hdd/isaac/Isaac-Object/Robot/nova_carter_removecam.usd"
-    iw_hub_usd_path: str = "/mnt/hdd/isaac/Isaac-Object/Robot/Collected_Idealworks/iw_hub.usd"
-    carter_v1_usd_path: str = "/mnt/hdd/isaac/Isaac-Object/Robot/carter_v1_removecam.usd"
+    scene_usd_path: str = "D:/Isaac-Project/cuopt_raw_graph.usd"
+    nova_carter_usd_path: str = "D:/Isaac-Project/nova_carter_removecam.usd"
+    iw_hub_usd_path: str = "D:/Isaac-Project/iw_hub.usd"
+    carter_v1_usd_path: str = "D:/Isaac-Project/carter_v1_removecam.usd"
     # env
     decimation: int = 2
     episode_length_s: float = 5.0

@@ -4,7 +4,7 @@ from isaaclab.actuators import ImplicitActuatorCfg
 from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR
 
 CARTER_V1_CONFIG = ArticulationCfg(
-    spawn=sim_utils.UsdFileCfg(usd_path="/mnt/hdd/isaac/Isaac-Object/Robot/carter_v1_removecam.usd"),
+    spawn=sim_utils.UsdFileCfg(usd_path="D:/Isaac-Project/carter_v1_removecam.usd"),
         actuators={
         "wheels": ImplicitActuatorCfg(
             joint_names_expr=[".*"],
