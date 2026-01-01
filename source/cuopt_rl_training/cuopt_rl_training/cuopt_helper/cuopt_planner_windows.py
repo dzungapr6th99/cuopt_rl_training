@@ -50,7 +50,7 @@ class CuOptPlanner:
                 "time_limit": self.time_limits
             },
         }
-        print(payload)
+        #print(payload)
         req_id = self._submit_request(payload)
 
         # ✅ poll status (1s/lần) và CHỈ KHI completed mới gọi /solution
@@ -183,3 +183,4 @@ class CuOptPlanner:
         text = re.sub(r"[^a-z]+", "", text)
 
         return text
+    

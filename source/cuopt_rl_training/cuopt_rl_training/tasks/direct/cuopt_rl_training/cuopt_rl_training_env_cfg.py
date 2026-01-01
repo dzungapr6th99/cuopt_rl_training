@@ -12,13 +12,13 @@ from isaaclab.utils import configclass
 @configclass
 class CuoptRlTrainingEnvCfg(DirectRLEnvCfg):
     # paths
-    scene_usd_path: str = "D:/Isaac-Project/cuopt_raw_graph.usd"
+    scene_usd_path: str = "D:/Isaac-Project/simple_cuopt_only.usd"
     nova_carter_usd_path: str = "D:/Isaac-Project/nova_carter_removecam.usd"
     iw_hub_usd_path: str = "D:/Isaac-Project/iw_hub.usd"
     carter_v1_usd_path: str = "D:/Isaac-Project/carter_v1_removecam.usd"
     # env
     decimation: int = 2
-    episode_length_s: float = 5.0
+    episode_length_s: float = 60.0
 
     # ====== Fleet scenario (server-training) ======
     n_locations: int = 30
@@ -49,7 +49,7 @@ class CuoptRlTrainingEnvCfg(DirectRLEnvCfg):
     terminate_on_solve_fail: bool = False
 
     # simulation
-    sim: SimulationCfg = SimulationCfg(dt=1/24, render_interval=decimation)
+    sim: SimulationCfg = SimulationCfg(dt=1/12, render_interval=decimation)
 
     # scene
     scene: InteractiveSceneCfg = InteractiveSceneCfg(
